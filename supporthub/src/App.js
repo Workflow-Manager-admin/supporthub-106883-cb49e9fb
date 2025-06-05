@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import './App.css';
 
 // Color theme constants
@@ -11,105 +11,214 @@ const COLORS = {
   border: '#E0E0E0',
 };
 
-// Ticket statuses
 const STATUS_OPTIONS = ['Open', 'In Progress', 'Resolved'];
-
-/**
- * Generate a random ID for new tickets (stub for production backend)
- */
-function generateId() {
-  return Math.random().toString(36).substring(2, 9);
-}
-
-/**
- * Format date into readable string
- */
-function formatDate(date) {
-  return new Date(date).toLocaleString();
-}
+const API_BASE = 'http://localhost:4001/api'; // adjust if deployed elsewhere
 
 // PUBLIC_INTERFACE
 function App() {
-  // State
   const [role, setRole] = useState(null); // 'user' | 'agent'
   const [userName, setUserName] = useState('');
+  const [userEmail, setUserEmail] = useState('');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
 
-  // Tickets are local for demo; In prod, these would be fetched from server.
-  const [tickets, setTickets] = useState([
-    // Sample for demo
-    {
-      id: generateId(),
-      title: 'Cannot access account',
-      description: 'Having trouble logging in since yesterday.',
-      createdBy: 'Alice',
-      createdAt: new Date(Date.now() - 86400000),
-      status: 'Open',
-      assignedTo: '',
-      updatedAt: new Date(Date.now() - 86000000),
-    },
-    {
-      id: generateId(),
-      title: 'Billing discrepancy',
-      description: 'Amount on invoice is incorrect.',
-      createdBy: 'Bob',
-      createdAt: new Date(Date.now() - 43200000),
-      status: 'In Progress',
-      assignedTo: 'Agent Jane',
-      updatedAt: new Date(Date.now() - 43000000),
-    }
-  ]);
+  const [tickets, setTickets] = useState([]);
+  const [ticketsLoading, setTicketsLoading] = useState(false);
+  const [ticketsError, setTicketsError] = useState(null);
+
+  // UI navigation & select
   const [activeView, setActiveView] = useState('dashboard'); // 'dashboard' | 'ticket-create' | 'ticket-detail'
   const [selectedTicketId, setSelectedTicketId] = useState(null);
+  const [globalLoading, setGlobalLoading] = useState(false);
+
+  // On first render, check session (persisted login)
+  useEffect(() => {
+    setGlobalLoading(true);
+    fetch(`${API_BASE}/auth/me`, {
+      credentials: 'include'
+    })
+      .then(r => {
+        if (!r.ok) throw new Error();
+        return r.json();
+      })
+      .then(json => {
+        setRole(json.user.role);
+        setUserName(json.user.name);
+        setUserEmail(json.user.email);
+        setIsAuthenticated(true);
+      })
+      .catch(() => {
+        setRole(null);
+        setUserName('');
+        setIsAuthenticated(false);
+      })
+      .finally(() => setGlobalLoading(false));
+  }, []);
+
+  // Whenever auth/role changes, fetch tickets if authenticated
+  useEffect(() => {
+    if (isAuthenticated && role) {
+      fetchTickets();
+    } else {
+      setTickets([]);
+    }
+    // eslint-disable-next-line
+  }, [isAuthenticated, role]);
+
+  // Fetch tickets, agent gets all, user gets theirs
+  function fetchTickets() {
+    setTicketsLoading(true);
+    setTicketsError(null);
+    fetch(`${API_BASE}/tickets`, {
+      credentials: 'include'
+    })
+      .then(r => {
+        if (!r.ok) throw r;
+        return r.json();
+      })
+      .then(json => {
+        setTickets(
+          json.tickets.map(t => ({
+            ...t,
+            id: t._id,
+            createdBy: t.createdByName || '',
+            createdAt: new Date(t.createdAt),
+            updatedAt: new Date(t.updatedAt)
+          }))
+        );
+      })
+      .catch(async r => {
+        let err = 'Failed to fetch tickets';
+        if (r.json) {
+          try { const data = await r.json(); err = data.error || err; } catch{}
+        }
+        setTickets([]);
+        setTicketsError(err);
+      })
+      .finally(() => setTicketsLoading(false));
+  }
 
   // ---- LOGIN LOGIC ----
 
   // PUBLIC_INTERFACE
-  function handleLogin(roleSelection, nameInput) {
-    setRole(roleSelection);
-    setUserName(nameInput);
-    setIsAuthenticated(true);
-    setActiveView('dashboard');
+  function handleLogin({ email, password, role: inputRole, name, isRegister }, onError) {
+    setGlobalLoading(true);
+    const path = isRegister ? '/auth/signup' : '/auth/login';
+    fetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(
+        isRegister
+          ? { name, email, password, role: inputRole }
+          : { email, password }
+      ),
+    })
+      .then(async r => {
+        if (!r.ok) {
+          let errMsg = 'Failed';
+          try { const data = await r.json(); errMsg = data.error || errMsg; } catch {}
+          throw new Error(errMsg);
+        }
+        return r.json();
+      })
+      .then(json => {
+        setRole(json.user.role);
+        setUserName(json.user.name);
+        setUserEmail(json.user.email);
+        setIsAuthenticated(true);
+        setActiveView('dashboard');
+      })
+      .catch(e => {
+        onError(e.message || 'Login/Register failed.');
+      })
+      .finally(() => setGlobalLoading(false));
   }
 
   // PUBLIC_INTERFACE
   function handleLogout() {
-    setRole(null);
-    setUserName('');
-    setIsAuthenticated(false);
-    setActiveView('dashboard');
-    setSelectedTicketId(null);
+    setGlobalLoading(true);
+    fetch(`${API_BASE}/auth/logout`, {
+      method: 'POST',
+      credentials: 'include'
+    })
+      .then(() => {
+        setRole(null);
+        setUserName('');
+        setUserEmail('');
+        setIsAuthenticated(false);
+        setActiveView('dashboard');
+        setSelectedTicketId(null);
+      })
+      .finally(() => setGlobalLoading(false));
   }
 
   // ---- TICKET HANDLERS ----
 
   // PUBLIC_INTERFACE
-  function handleCreateTicket(ticket) {
-    setTickets(prev => [
-      {
-        ...ticket,
-        id: generateId(),
-        createdAt: new Date(),
-        updatedAt: new Date(),
-        status: 'Open',
-        assignedTo: '',
-      },
-      ...prev,
-    ]);
-    setActiveView('dashboard');
+  function handleCreateTicket(ticket, onError, onSuccess) {
+    setGlobalLoading(true);
+    fetch(`${API_BASE}/tickets`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        title: ticket.title,
+        description: ticket.description
+      })
+    })
+      .then(async r => {
+        if (!r.ok) {
+          let err = 'Failed to create ticket';
+          try { err = (await r.json()).error || err; } catch {}
+          throw new Error(err);
+        }
+        return r.json();
+      })
+      .then(json => {
+        // Append to tickets (optimistically); or simply refresh
+        // setTickets(prev => [toClientTicket(json.ticket), ...prev]);
+        fetchTickets();
+        setActiveView('dashboard');
+        if (onSuccess) onSuccess();
+      })
+      .catch(e => {
+        if (onError) onError(e.message || 'Error creating ticket');
+      })
+      .finally(() => setGlobalLoading(false));
   }
 
   // PUBLIC_INTERFACE
-  function handleUpdateTicket(updated) {
-    setTickets(prev =>
-      prev.map(t =>
-        t.id === updated.id
-          ? { ...t, ...updated, updatedAt: new Date() }
-          : t
-      )
-    );
-    setActiveView('dashboard');
-    setSelectedTicketId(null);
+  function handleUpdateTicket(updated, onError, onSuccess) {
+    setGlobalLoading(true);
+    fetch(`${API_BASE}/tickets/${updated.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        status: updated.status,
+        assignedTo: updated.assignedTo,
+        description: updated.description
+      })
+    })
+      .then(async r => {
+        if (!r.ok) {
+          let err = 'Failed to update ticket';
+          try { err = (await r.json()).error || err; } catch {}
+          throw new Error(err);
+        }
+        return r.json();
+      })
+      .then(json => {
+        // setTickets(prev => prev.map(t => t.id === updated.id ? toClientTicket(json.ticket) : t));
+        fetchTickets();
+        if (onSuccess) onSuccess();
+        setActiveView('dashboard');
+        setSelectedTicketId(null);
+      })
+      .catch(e => {
+        if (onError) onError(e.message || 'Error updating ticket');
+      })
+      .finally(() => setGlobalLoading(false));
   }
 
   // PUBLIC_INTERFACE
@@ -128,9 +237,17 @@ function App() {
 
   let content = null;
 
-  if (!isAuthenticated) {
+  if (globalLoading) {
     content = (
-      <LoginPage onLogin={handleLogin} />
+      <div style={{ margin: '60px auto', textAlign: 'center', color: COLORS.primary }}>
+        <div className="spinner" style={{
+          margin: '0 auto 16px', width: 32, height: 32, border: '4px solid #eee', borderTop: `4px solid ${COLORS.primary}`, borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+        Loading...
+      </div>
+    );
+  } else if (!isAuthenticated) {
+    content = (
+      <LoginPage onLogin={handleLogin} loading={globalLoading} />
     );
   } else if (role === 'user') {
     // User dashboard: Create ticket / list my tickets / view details
@@ -141,6 +258,8 @@ function App() {
           tickets={tickets.filter(t => t.createdBy === userName)}
           onCreate={() => setActiveView('ticket-create')}
           onView={handleSelectTicket}
+          loading={ticketsLoading}
+          error={ticketsError}
         />
       );
     } else if (activeView === 'ticket-create') {
@@ -149,6 +268,7 @@ function App() {
           userName={userName}
           onCreate={handleCreateTicket}
           onCancel={handleBackToList}
+          loading={globalLoading}
         />
       );
     } else if (activeView === 'ticket-detail') {
@@ -170,6 +290,8 @@ function App() {
           agentName={userName}
           tickets={tickets}
           onView={handleSelectTicket}
+          loading={ticketsLoading}
+          error={ticketsError}
         />
       );
     } else if (activeView === 'ticket-detail') {
@@ -206,6 +328,9 @@ function App() {
       <main style={{ flex: 1, marginTop: 76, paddingBottom: 32 }}>
         <div className="container">{content}</div>
       </main>
+      <style>{`
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+      `}</style>
     </div>
   );
 }
@@ -253,24 +378,29 @@ function Navbar({ role, userName, isAuthenticated, onLogout }) {
   );
 }
 
-// ---------------- LOGIN PAGE ----------------
-function LoginPage({ onLogin }) {
+// ---------------- LOGIN / REGISTER PAGE ----------------
+function LoginPage({ onLogin, loading }) {
   const [role, setRole] = useState('user');
+  const [register, setRegister] = useState(false);
   const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [pw, setPw] = useState('');
   const [error, setError] = useState('');
+  // for login, hide name input, show on register
 
-  // PUBLIC_INTERFACE
-  function handleLogin(e) {
+  function handleSubmit(e) {
     e.preventDefault();
-    if (!name.trim()) {
-      setError('Please enter your name.');
-      return;
+    setError('');
+    if (register) {
+      if (!name.trim()) return setError('Enter name.');
+      if (!email.trim()) return setError('Enter email.');
+      if (!pw.trim()) return setError('Enter password.');
+      if (!['user', 'agent'].includes(role)) return setError('Select a role.');
+      onLogin({ email, password: pw, role, name, isRegister: true }, setError);
+    } else {
+      if (!email.trim() || !pw.trim()) return setError('Enter email and password.');
+      onLogin({ email, password: pw, isRegister: false }, setError);
     }
-    if (name.length > 20) {
-      setError('Name must be at most 20 characters.');
-      return;
-    }
-    onLogin(role, name.trim());
   }
 
   return (
@@ -285,54 +415,77 @@ function LoginPage({ onLogin }) {
       }}
     >
       <div style={{ marginBottom: 16, fontSize: 28, fontWeight: 700, color: COLORS.primary }}>
-        Welcome to SupportHub
+        {register ? "Register for SupportHub" : "Welcome to SupportHub"}
       </div>
-      <form onSubmit={handleLogin}>
+      <form onSubmit={handleSubmit}>
+        {register &&
+          <label style={{ fontWeight: 600, color: COLORS.text }}>
+            Name:
+            <input
+              type="text"
+              required={register}
+              value={name}
+              maxLength={32}
+              onChange={e => setName(e.target.value)}
+              style={{ ...inputStyle, marginBottom: 9 }}
+              placeholder="Your full name"
+              autoComplete="name"
+            />
+          </label>
+        }
         <label style={{ fontWeight: 600, color: COLORS.text }}>
-          Name:
+          Email:
           <input
-            type="text"
+            type="email"
             required
-            value={name}
-            maxLength={20}
-            onChange={e => { setName(e.target.value); setError(''); }}
-            style={{
-              width: "100%",
-              padding: 10,
-              marginTop: 6,
-              marginBottom: 18,
-              borderRadius: 4,
-              border: `1px solid ${COLORS.border}`,
-              outline: "none"
-            }}
-            placeholder="Enter your name"
+            value={email}
+            maxLength={40}
+            onChange={e => setEmail(e.target.value)}
+            style={{ ...inputStyle, marginBottom: 9 }}
+            placeholder="your@email.com"
+            autoComplete="username"
           />
         </label>
-        <div style={{ marginBottom: 18 }}>
-          <div style={{ fontWeight: 500, marginBottom: 5 }}>Select Role:</div>
-          <label>
-            <input
-              type="radio"
-              name="role"
-              value="user"
-              checked={role === 'user'}
-              onChange={() => setRole('user')}
-              style={{ marginRight: 6 }}
-            /> User
-          </label>
-          <label style={{ marginLeft: 16 }}>
-            <input
-              type="radio"
-              name="role"
-              value="agent"
-              checked={role === 'agent'}
-              onChange={() => setRole('agent')}
-              style={{ marginRight: 6 }}
-            /> Agent
-          </label>
-        </div>
+        <label style={{ fontWeight: 600, color: COLORS.text }}>
+          Password:
+          <input
+            type="password"
+            required
+            value={pw}
+            maxLength={32}
+            onChange={e => setPw(e.target.value)}
+            style={inputStyle}
+            placeholder="Password"
+            autoComplete={register ? "new-password" : "current-password"}
+          />
+        </label>
+        {register && (
+          <div style={{ margin: '12px 0 16px' }}>
+            <div style={{ fontWeight: 500, marginBottom: 5 }}>Select Role:</div>
+            <label>
+              <input
+                type="radio"
+                name="role"
+                value="user"
+                checked={role === 'user'}
+                onChange={() => setRole('user')}
+                style={{ marginRight: 6 }}
+              /> User
+            </label>
+            <label style={{ marginLeft: 16 }}>
+              <input
+                type="radio"
+                name="role"
+                value="agent"
+                checked={role === 'agent'}
+                onChange={() => setRole('agent')}
+                style={{ marginRight: 6 }}
+              /> Agent
+            </label>
+          </div>
+        )}
         {error && (
-          <div style={{ color: "#D33", fontSize: 14, marginBottom: 12 }}>{error}</div>
+          <div style={{ color: "#D33", fontSize: 14, marginBottom: 12, minHeight: 24 }}>{error}</div>
         )}
         <button
           className="btn btn-large"
@@ -344,16 +497,30 @@ function LoginPage({ onLogin }) {
             fontWeight: 600,
             fontSize: 16
           }}
+          disabled={loading}
         >
-          Login
+          {register ? "Register" : "Login"}
         </button>
       </form>
+      <div style={{ marginTop: 14, fontSize: 15, color: COLORS.text, textAlign: 'center' }}>
+        {register ? (
+          <>
+            Already have an account?{' '}
+            <span style={{ color: COLORS.primary, cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { setRegister(false); setError(''); }}>Login</span>
+          </>
+        ) : (
+          <>
+            New user or agent?{' '}
+            <span style={{ color: COLORS.primary, cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { setRegister(true); setError(''); }}>Register</span>
+          </>
+        )}
+      </div>
     </div>
   );
 }
 
 // ---------------- USER DASHBOARD ----------------
-function UserDashboard({ userName, tickets, onCreate, onView }) {
+function UserDashboard({ userName, tickets, onCreate, onView, loading, error }) {
   return (
     <div style={{ padding: '34px 0 0' }}>
       <div style={{ fontSize: 24, fontWeight: 600, marginBottom: 12, color: COLORS.primary }}>
@@ -368,7 +535,11 @@ function UserDashboard({ userName, tickets, onCreate, onView }) {
         <div style={{ fontWeight: 600, fontSize: 16, marginBottom: 10 }}>
           My Support Tickets ({tickets.length})
         </div>
-        {tickets.length === 0 ? (
+        {loading ? (
+          <div style={{ color: COLORS.primary, padding: 16 }}>Loading your tickets...</div>
+        ) : error ? (
+          <div style={{ color: "#D33", background: COLORS.white, padding: 18, borderRadius: 5 }}>{error}</div>
+        ) : tickets.length === 0 ? (
           <div style={{ color: COLORS.text, background: COLORS.secondary, padding: 30, borderRadius: 8 }}>
             You have not created any tickets yet.
           </div>
@@ -418,7 +589,7 @@ function UserDashboard({ userName, tickets, onCreate, onView }) {
 }
 
 // ---------------- AGENT DASHBOARD ----------------
-function AgentDashboard({ agentName, tickets, onView }) {
+function AgentDashboard({ agentName, tickets, onView, loading, error }) {
   // Filtering tickets by status for simple management
   const [statusFilter, setStatusFilter] = useState('All');
 
@@ -452,7 +623,11 @@ function AgentDashboard({ agentName, tickets, onView }) {
             ))}
           </select>
         </div>
-        {filteredTickets.length === 0 ? (
+        {loading ? (
+          <div style={{ color: COLORS.primary, padding: 16 }}>Loading tickets...</div>
+        ) : error ? (
+          <div style={{ color: "#D33", background: COLORS.white, padding: 18, borderRadius: 5 }}>{error}</div>
+        ) : filteredTickets.length === 0 ? (
           <div style={{ color: COLORS.text, background: COLORS.secondary, padding: 30, borderRadius: 8 }}>
             No tickets to display for selected status.
           </div>
@@ -505,14 +680,14 @@ function AgentDashboard({ agentName, tickets, onView }) {
 }
 
 // ---------------- TICKET CREATE (USER) ----------------
-function TicketCreate({ userName, onCreate, onCancel }) {
+function TicketCreate({ userName, onCreate, onCancel, loading }) {
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
   const [error, setError] = useState('');
 
-  // PUBLIC_INTERFACE
   function handleSubmit(e) {
     e.preventDefault();
+    setError('');
     if (!title.trim() || !desc.trim()) {
       setError('Title and description are required.');
       return;
@@ -525,11 +700,10 @@ function TicketCreate({ userName, onCreate, onCancel }) {
       setError('Description max length is 500 characters.');
       return;
     }
-    onCreate({
-      title: title.trim(),
-      description: desc.trim(),
-      createdBy: userName,
-    });
+    onCreate(
+      { title: title.trim(), description: desc.trim(), createdBy: userName },
+      setError
+    );
   }
 
   return (
@@ -582,6 +756,7 @@ function TicketCreate({ userName, onCreate, onCancel }) {
               fontSize: 15,
               flex: 1,
             }}
+            disabled={loading}
           >
             Submit
           </button>
@@ -596,6 +771,7 @@ function TicketCreate({ userName, onCreate, onCancel }) {
               flex: 1
             }}
             onClick={onCancel}
+            disabled={loading}
           >
             Cancel
           </button>
@@ -609,29 +785,35 @@ function TicketCreate({ userName, onCreate, onCancel }) {
 function TicketDetail({ ticket, role, userName, onBack, onUpdate }) {
   const [editing, setEditing] = useState(false);
   const [status, setStatus] = useState(ticket.status);
-  const [assignedTo, setAssignedTo] = useState(ticket.assignedTo);
+  const [assignedTo, setAssignedTo] = useState(ticket.assignedTo || '');
   const [note, setNote] = useState(ticket.description);
+  const [error, setError] = useState('');
 
   // Editable for agent only
   const canEdit = role === 'agent' && !!onUpdate;
 
-  // PUBLIC_INTERFACE
   function handleUpdate(e) {
     e.preventDefault();
+    setError('');
     // Only allow update if status/assigned changed
     if (
       ticket.status !== status ||
       ticket.assignedTo !== assignedTo ||
       ticket.description !== note
     ) {
-      onUpdate({
-        ...ticket,
-        status,
-        assignedTo,
-        description: note,
-      });
+      onUpdate(
+        {
+          ...ticket,
+          status,
+          assignedTo,
+          description: note,
+        },
+        setError,
+        () => setEditing(false)
+      );
+    } else {
+      setEditing(false);
     }
-    setEditing(false);
   }
 
   return (
@@ -729,6 +911,7 @@ function TicketDetail({ ticket, role, userName, onBack, onUpdate }) {
             />
           </>
         )}
+        {error && (<div style={{ color: "#D33", fontSize: 14, margin: '7px 0 10px' }}>{error}</div>)}
         {canEdit && (
           <div style={{ display: 'flex', gap: 10, marginTop: 12 }}>
             {editing ? (
@@ -757,7 +940,7 @@ function TicketDetail({ ticket, role, userName, onBack, onUpdate }) {
                   onClick={() => {
                     setEditing(false);
                     setStatus(ticket.status);
-                    setAssignedTo(ticket.assignedTo);
+                    setAssignedTo(ticket.assignedTo || '');
                     setNote(ticket.description);
                   }}
                 >Cancel</button>
@@ -810,7 +993,12 @@ function TicketStatusPill({ status }) {
   );
 }
 
-// ------------- Styles -------------
+// ------------- Utilities & Style -------------
+function formatDate(date) {
+  if (!(date instanceof Date)) return '';
+  return date.toLocaleString();
+}
+
 const tableThStyle = {
   padding: '12px 10px',
   textAlign: 'left',
